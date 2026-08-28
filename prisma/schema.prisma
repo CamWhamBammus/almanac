@@ -1,0 +1,199 @@
+// Almanac — local-first calendar & todo workspace.
+// SQLite database, same "one file under Application Support" pattern as
+// Reading Cabin.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum Priority {
+  LOW
+  NORMAL
+  HIGH
+}
+
+enum Repeat {
+  NONE
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+// The species of plant a habit is grown as in the Habits page garden —
+// purely cosmetic, chosen at creation and changeable later. Growth itself
+// is computed from the habit's own completion history, not stored.
+enum PlantType {
+  TREE
+  PINE
+  WILLOW
+  BUSH
+  FLOWER
+  SUNFLOWER
+  LAVENDER
+  SUCCULENT
+  CACTUS
+  FERN
+  VINE
+  MUSHROOM
+}
+
+model Task {
+  id    String  @id @default(cuid())
+  title String
+  notes String?
+
+  // Day-level only (time-of-day isn't tracked for tasks — that's what
+  // Event is for). Null means "someday," surfaced in its own bucket
+  // instead of cluttering Today/Upcoming.
+  dueDate DateTime?
+
+  done        Boolean   @default(false)
+  completedAt DateTime?
+
+  priority Priority @default(NORMAL)
+
+  // Only meaningful when dueDate is set — completing a repeating task
+  // spawns the next open instance with dueDate advanced by this interval,
+  // rather than mutating this row, so completion history stays intact.
+  repeat Repeat @default(NONE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([dueDate])
+  @@index([done])
+}
+
+model Habit {
+  id    String  @id @default(cuid())
+  name  String
+  notes String?
+
+  // Comma-separated day-of-week indices (0=Sun..6=Sat), e.g. "1,3,5" for
+  // Mon/Wed/Fri. Null/empty means every day.
+  daysOfWeek String?
+
+  // Reps needed to count the day done, e.g. 3 for "3 leetcodes a day."
+  // Default 1 keeps every existing habit a plain done/not-done toggle.
+  targetCount Int @default(1)
+
+  plantType PlantType @default(TREE)
+
+  // Where this plant sits in the garden bed. Ties break on createdAt, so
+  // existing habits keep their current order until deliberately arranged.
+  sortOrder Int @default(0)
+
+  archived   Boolean   @default(false)
+  archivedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  completions HabitCompletion[]
+  challenges  Challenge[]
+
+  @@index([archived])
+}
+
+// One row per habit per day with any progress. `date` is a pure day key
+// (midnight local), same convention as Event.date. `count` is reps logged
+// so far that day; the day reads as done once count reaches the habit's
+// targetCount. A row only exists once at least one rep is logged — a day
+// with no row is 0/targetCount, not a partial row at 0.
+model HabitCompletion {
+  id      String @id @default(cuid())
+  habitId String
+  habit   Habit  @relation(fields: [habitId], references: [id], onDelete: Cascade)
+
+  date  DateTime
+  count Int      @default(1)
+
+  createdAt DateTime @default(now())
+
+  @@unique([habitId, date])
+  @@index([date])
+}
+
+// A calendar entry for a specific day. `date` is always stored as
+// midnight UTC of that day — a pure date key, not a real instant — so
+// day-bucketing never drifts across timezones. startTime/endTime are
+// free-form "HH:mm" display labels rather than real DateTimes, since nothing
+// here needs to reason about durations or timezones, only show a time.
+model Event {
+  id    String  @id @default(cuid())
+  title String
+  notes String?
+
+  date      DateTime
+  startTime String?
+  endTime   String?
+
+  // Same "spawn the next occurrence on completion" model tasks use would
+  // be wrong here — an event isn't completed, it just passes. So a
+  // repeating event is stored once and *projected* forward at read time
+  // (see lib/eventOccurrences.ts); only this seed row exists in the table.
+  repeat      Repeat    @default(NONE)
+  repeatUntil DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([date])
+}
+
+// A day you were deliberately away — ill, travelling, or simply resting.
+//
+// Global rather than per-habit: the real use case is "I wasn't around",
+// which applies to the whole garden at once. On these days habits count as
+// unscheduled, so streaks survive, plants don't wilt, and Growth neither
+// rises nor falls. `date` is a pure day key (local midnight), the same
+// convention Event.date and HabitCompletion.date use.
+model RestDay {
+  id   String   @id @default(cuid())
+  date DateTime @unique
+  note String?
+
+  createdAt DateTime @default(now())
+
+  @@index([date])
+}
+
+// A short note attached to a day — the "almanac" half of the app, sitting
+// alongside all the counting. One entry per day, same pure day-key
+// convention as RestDay and Event.
+model JournalEntry {
+  id   String   @id @default(cuid())
+  date DateTime @unique
+  body String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([date])
+}
+
+// "Do this every day for N days." A focused push on a single habit, with
+// its own progress and a Growth reward for finishing.
+//
+// Progress is counted from completion history rather than stored, so it can
+// never disagree with the habit it's tracking.
+model Challenge {
+  id      String @id @default(cuid())
+  habitId String
+  habit   Habit  @relation(fields: [habitId], references: [id], onDelete: Cascade)
+
+  targetDays Int
+  startDate  DateTime
+
+  completedAt DateTime?
+  abandonedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([habitId])
+}
